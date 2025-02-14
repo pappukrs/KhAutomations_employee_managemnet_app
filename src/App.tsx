@@ -4,7 +4,7 @@ import { AuthProvider } from './contexts/AuthContext';
 import Login from './pages/Login';
 import EmployeeDashboard from './pages/EmployeeDashboard';
 import AdminDashboard from './pages/AdminDashboard';
-import ProtectedRoute from './components/ProtectedRoute';
+// import ProtectedRoute from './components/ProtectedRoute';
 import CreateTask from './pages/CreateTask';
 import EditTask from './pages/EditTask';
 
@@ -16,27 +16,27 @@ function App() {
           <Route path="/login" element={<Login />} />
           
           <Route path="/employee" element={
-            <ProtectedRoute allowedRole="employee">
+            // <ProtectedRoute allowedRole="employee">
               <EmployeeDashboard />
-            </ProtectedRoute>
+            // </ProtectedRoute>
           } />
           
           <Route path="/employee/create-task" element={
-            <ProtectedRoute allowedRole="employee">
+            // <ProtectedRoute allowedRole="employee">
               <CreateTask />
-            </ProtectedRoute>
+            // </ProtectedRoute>
           } />
           
           <Route path="/employee/edit-task/:taskId" element={
-            <ProtectedRoute allowedRole="employee">
+            // <ProtectedRoute allowedRole="employee">
               <EditTask />
-            </ProtectedRoute>
+            // </ProtectedRoute>
           } />
           
           <Route path="/admin" element={
-            <ProtectedRoute allowedRole="admin">
+            // <ProtectedRoute allowedRole="admin">
               <AdminDashboard />
-            </ProtectedRoute>
+            // </ProtectedRoute>
           } />
           
           <Route path="/" element={<Navigate to="/login" replace />} />

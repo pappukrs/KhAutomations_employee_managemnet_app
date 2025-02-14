@@ -1,9 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { Loader2, MapPin, Upload, ArrowLeft, Image as ImageIcon } from 'lucide-react';
+import { Loader2, MapPin, Upload, ArrowLeft } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
 import { Loader } from '@googlemaps/js-api-loader';
@@ -23,6 +23,7 @@ const taskSchema = z.object({
   remaining_amount: z.number().min(0, 'Amount must be positive'),
   total_amount: z.number().min(0, 'Amount must be positive'),
   change_reason: z.string().min(1, 'Please provide a reason for the changes'),
+  updator_name: z.string().min(1, 'Updator name is required'),
 });
 
 type TaskFormData = z.infer<typeof taskSchema>;
@@ -38,6 +39,9 @@ export default function EditTask() {
   const [location, setLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [newImages, setNewImages] = useState<File[]>([]);
   const [loadingLocation, setLoadingLocation] = useState(false);
+  const [imagePreviews, setImagePreviews] = useState<string[]>([]);
+  const [uploadedImageUrls, setUploadedImageUrls] = useState<string[]>([]);
+  const [uploadingImages, setUploadingImages] = useState(false);
 
   const {
     register,
@@ -56,14 +60,7 @@ export default function EditTask() {
   // Update total amount when received or remaining changes
   const totalAmount = (amountReceived || 0) + (remainingAmount || 0);
 
-  useEffect(() => {
-    if (taskId) {
-      fetchTask();
-      fetchTaskImages();
-    }
-  }, [taskId]);
-
-  async function fetchTask() {
+  const fetchTask = useCallback(async () => {
     try {
       const { data, error } = await supabase
         .from('tasks')
@@ -74,7 +71,13 @@ export default function EditTask() {
       if (error) throw error;
       if (data) {
         setTask(data);
-        setLocation(data.location);
+        // Update location from split coordinates
+        if (data.latitude && data.longitude) {
+          setLocation({
+            lat: data.latitude,
+            lng: data.longitude,
+          });
+        }
         reset({
           name: data.name,
           owner_name: data.owner_name,
@@ -85,6 +88,7 @@ export default function EditTask() {
           remaining_amount: data.remaining_amount,
           total_amount: data.total_amount,
           change_reason: '',
+          updator_name: data.updator_name || '',
         });
       }
     } catch (error) {
@@ -94,9 +98,9 @@ export default function EditTask() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [navigate, reset, taskId]);
 
-  async function fetchTaskImages() {
+  const fetchTaskImages = useCallback(async () => {
     try {
       const { data, error } = await supabase
         .from('task_images')
@@ -109,7 +113,14 @@ export default function EditTask() {
       console.error('Error fetching task images:', error);
       toast.error('Failed to load task images');
     }
-  }
+  }, [taskId]);
+
+  useEffect(() => {
+    if (taskId) {
+      fetchTask();
+      fetchTaskImages();
+    }
+  }, [taskId, fetchTask, fetchTaskImages]);
 
   async function detectLocation() {
     setLoadingLocation(true);
@@ -147,12 +158,73 @@ export default function EditTask() {
   }
 
   async function handleImageChange(e: React.ChangeEvent<HTMLInputElement>) {
+    console.log('handleImageChange triggered');
+    console.log('Event target:', e.target);
+    
     const files = Array.from(e.target.files || []);
+    console.log('Number of files selected:', files.length);
+    
+    if (files.length === 0) {
+      console.warn('No files selected, returning early');
+      return;
+    }
+
+    // Log detailed file information
+    files.forEach((file, index) => {
+      console.log(`File ${index + 1} details:`, {
+        name: file.name,
+        type: file.type,
+        size: `${(file.size / 1024).toFixed(2)} KB`,
+        lastModified: new Date(file.lastModified).toISOString()
+      });
+    });
+
     setNewImages(files);
+    
+    const previews = files.map(file => {
+      const preview = URL.createObjectURL(file);
+      console.log(`Created preview URL for ${file.name}:`, preview);
+      return preview;
+    });
+    setImagePreviews(previews);
+
+    try {
+      console.log('Starting image upload process');
+      setUploadingImages(true);
+      
+      for (const file of files) {
+        console.log(`Beginning upload for file: ${file.name}`);
+        
+        const publicUrl = await uploadImage(file);
+        console.log(`Upload successful for ${file.name}`);
+        console.log('Received public URL:', publicUrl);
+        
+        setUploadedImageUrls(prev => {
+          console.log('Updating uploadedImageUrls state', [...prev, publicUrl]);
+          return [...prev, publicUrl];
+        });
+      }
+      
+      toast.success(`Successfully uploaded ${files.length} images`);
+    } catch (error) {
+      console.error('Error during upload process:', error);
+      toast.error(`Failed to upload images: ${(error as Error).message}`);
+    } finally {
+      console.log('Upload process completed');
+      setUploadingImages(false);
+    }
   }
 
+  // Add cleanup for previews when component unmounts
+  useEffect(() => {
+    return () => {
+      // Cleanup object URLs to avoid memory leaks
+      imagePreviews.forEach(preview => URL.revokeObjectURL(preview));
+    };
+  }, [imagePreviews]);
+
   async function trackChanges(oldData: Task, newData: TaskFormData) {
-    const fields: (keyof Task)[] = ['name', 'owner_name', 'task_date', 'status', 'comments', 'amount_received', 'remaining_amount'];
+    const fields = ['name', 'owner_name', 'task_date', 'status', 'comments', 'amount_received', 'remaining_amount'] as const;
     
     for (const field of fields) {
       if (oldData[field]?.toString() !== newData[field]?.toString()) {
@@ -174,52 +246,98 @@ export default function EditTask() {
     }
   }
 
+  async function uploadImage(file: File): Promise<string> {
+    console.log('uploadImage function called with file:', file.name);
+    
+    if (!user?.id || !taskId) {
+      const error = new Error('User or task ID not found');
+      console.error(error);
+      throw error;
+    }
+
+    const fileExt = file.name.split('.').pop();
+    const fileName = `${Date.now()}-${Math.random().toString(36).substring(2)}.${fileExt}`;
+    const filePath = `${user.id}/${taskId}/${fileName}`;
+    
+    console.log('Generated file path:', filePath);
+    console.log('Starting Supabase upload...');
+
+    try {
+      const { data, error } = await supabase.storage
+        .from('khautomations')
+        .upload(filePath, file, {
+          cacheControl: '3600',
+          upsert: false
+        });
+
+      if (error) {
+        console.error('Supabase upload error:', error);
+        throw error;
+      }
+      
+      console.log('Upload successful, storage data:', data);
+
+      const { data: urlData } = supabase.storage
+        .from('khautomations')
+        .getPublicUrl(filePath);
+
+      console.log('Generated public URL:', urlData.publicUrl);
+      return urlData.publicUrl;
+    } catch (error) {
+      console.error('Upload failed with error:', error);
+      throw error;
+    }
+  }
+
   async function onSubmit(data: TaskFormData) {
-    if (!user || !task) return;
+    if (!user || !task) {
+      console.error('User or task is null');
+      return;
+    }
 
     setSaving(true);
     try {
       // Track changes before updating
+      console.log('Tracking changes with data:', { oldTask: task, newData: data });
       await trackChanges(task, data);
 
-      // Update task
-      const { error: taskError } = await supabase
-        .from('tasks')
-        .update({
-          ...data,
-          total_amount: totalAmount,
-          location: location,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', taskId);
+      // Prepare update data
+      const updateData = {
+        ...data,
+        total_amount: totalAmount,
+        latitude: location?.lat,
+        longitude: location?.lng,
+        updated_at: new Date().toISOString(),
+        submission_status: 'in_process',
+      };
+      console.log('Updating task with data:', updateData);
 
-      if (taskError) throw taskError;
+      // Update task with split location coordinates
+      const { data: updatedTask, error: taskError } = await supabase
+        .from('tasks')
+        .update(updateData)
+        .eq('id', taskId)
+        .select();
+
+      if (taskError) {
+        console.error('Supabase update error:', taskError);
+        throw taskError;
+      }
+
+      console.log('Task update response:', updatedTask);
 
       // Upload new images if any
       if (newImages.length > 0) {
         for (const image of newImages) {
-          const fileExt = image.name.split('.').pop();
-          const fileName = `${Math.random()}.${fileExt}`;
-          const filePath = `${user.id}/${taskId}/${fileName}`;
-
-          const { error: uploadError } = await supabase.storage
-            .from('task-images')
-            .upload(filePath, image);
-
-          if (uploadError) throw uploadError;
-
-          // Get public URL
-          const { data: publicUrl } = supabase.storage
-            .from('task-images')
-            .getPublicUrl(filePath);
-
-          // Save image reference
+          const publicUrl = await uploadImage(image);
+          
+          // Store the image reference in task_images table
           const { error: imageError } = await supabase
             .from('task_images')
             .insert([
               {
                 task_id: taskId,
-                image_url: publicUrl.publicUrl,
+                image_url: publicUrl,
               },
             ]);
 
@@ -231,6 +349,12 @@ export default function EditTask() {
       navigate('/employee');
     } catch (error) {
       console.error('Error updating task:', error);
+      if (error instanceof Error) {
+        console.error('Error message:', error.message);
+        const supabaseError = error as { details?: string; hint?: string };
+        if ('details' in error) console.error('Error details:', supabaseError.details);
+        if ('hint' in error) console.error('Error hint:', supabaseError.hint);
+      }
       toast.error('Failed to update task');
     } finally {
       setSaving(false);
@@ -419,7 +543,11 @@ export default function EditTask() {
                 <label className="block text-sm font-medium text-gray-700">Add New Images</label>
                 <div className="mt-1 flex justify-center px-6 pt-5 pb-6 border-2 border-gray-300 border-dashed rounded-md">
                   <div className="space-y-1 text-center">
-                    <Upload className="mx-auto h-12 w-12 text-gray-400" />
+                    {uploadingImages ? (
+                      <Loader2 className="mx-auto h-12 w-12 text-gray-400 animate-spin" />
+                    ) : (
+                      <Upload className="mx-auto h-12 w-12 text-gray-400" />
+                    )}
                     <div className="flex text-sm text-gray-600">
                       <label
                         htmlFor="images"
@@ -432,7 +560,8 @@ export default function EditTask() {
                           multiple
                           accept="image/*"
                           onChange={handleImageChange}
-                          className="sr-only"
+                          className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                          disabled={uploadingImages}
                         />
                       </label>
                       <p className="pl-1">or drag and drop</p>
@@ -440,11 +569,31 @@ export default function EditTask() {
                     <p className="text-xs text-gray-500">PNG, JPG, GIF up to 10MB</p>
                   </div>
                 </div>
-                {newImages.length > 0 && (
-                  <div className="mt-2">
-                    <p className="text-sm text-gray-500">{newImages.length} new files selected</p>
+
+                {(imagePreviews.length > 0 || uploadedImageUrls.length > 0) && (
+                  <div className="mt-4">
+                    <h4 className="text-sm font-medium text-gray-700 mb-2">
+                      {uploadingImages ? 'Uploading Images...' : 'Uploaded Images'}
+                    </h4>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+                      {imagePreviews.map((preview, index) => (
+                        <div key={`preview-${index}`} className="relative aspect-w-1 aspect-h-1">
+                          <img
+                            src={preview}
+                            alt={`Preview ${index + 1}`}
+                            className="object-cover rounded-lg"
+                          />
+                          {uploadingImages && (
+                            <div className="absolute inset-0 bg-black bg-opacity-50 flex items-center justify-center rounded-lg">
+                              <Loader2 className="h-6 w-6 animate-spin text-white" />
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
+
               </div>
 
               <div className="sm:col-span-2">
@@ -460,6 +609,22 @@ export default function EditTask() {
                 />
                 {errors.change_reason && (
                   <p className="mt-1 text-sm text-red-600">{errors.change_reason.message}</p>
+                )}
+              </div>
+
+              <div className="sm:col-span-2">
+                <label htmlFor="updator_name" className="block text-sm font-medium text-gray-700">
+                  Updator Name
+                </label>
+                <input
+                  type="text"
+                  id="updator_name"
+                  {...register('updator_name')}
+                  className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
+                  placeholder="Enter your name"
+                />
+                {errors.updator_name && (
+                  <p className="mt-1 text-sm text-red-600">{errors.updator_name.message}</p>
                 )}
               </div>
             </div>

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -8,6 +8,7 @@ import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
 import { Loader } from '@googlemaps/js-api-loader';
 import toast from 'react-hot-toast';
+import { StorageError } from '@supabase/storage-js';
 
 const taskSchema = z.object({
   name: z.string().min(1, 'Task name is required'),
@@ -29,6 +30,9 @@ export default function CreateTask() {
   const [location, setLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [images, setImages] = useState<File[]>([]);
   const [loadingLocation, setLoadingLocation] = useState(false);
+  const [imagePreviews, setImagePreviews] = useState<string[]>([]);
+  const [uploadedImageUrls, setUploadedImageUrls] = useState<string[]>([]);
+  const [uploadingImages, setUploadingImages] = useState(false);
 
   const {
     register,
@@ -87,10 +91,97 @@ export default function CreateTask() {
     }
   }
 
-  async function handleImageChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(e.target.files || []);
-    setImages(files);
+  async function uploadImage(file: File, taskId: number): Promise<string> {
+    if (!user?.id) {
+      throw new Error('User ID not found');
+    }
+
+    const fileExt = file.name.split('.').pop();
+    const fileName = `${Math.random()}.${fileExt}`;
+    const filePath = `${user.id}/${taskId}/${fileName}`;
+
+    const { error } = await supabase.storage
+      .from('khautomations')  // Using khautomations bucket
+      .upload(filePath, file, {
+        cacheControl: '3600',
+        upsert: false
+      });
+
+    if (error) throw error as StorageError;
+
+    const { data: urlData } = supabase.storage
+      .from('khautomations')  // Using khautomations bucket
+      .getPublicUrl(filePath);
+
+    return urlData.publicUrl;
   }
+
+  async function handleImageChange(e: React.ChangeEvent<HTMLInputElement>) {
+    console.log('handleImageChange triggered');
+    console.log('Event target:', e.target);
+    
+    const files = Array.from(e.target.files || []);
+    console.log('Number of files selected:', files.length);
+    
+    if (files.length === 0) {
+      console.warn('No files selected, returning early');
+      return;
+    }
+
+    // Log detailed file information
+    files.forEach((file, index) => {
+      console.log(`File ${index + 1} details:`, {
+        name: file.name,
+        type: file.type,
+        size: `${(file.size / 1024).toFixed(2)} KB`,
+        lastModified: new Date(file.lastModified).toISOString()
+      });
+    });
+
+    setImages(files);
+    
+    // Create and set image previews
+    console.log('Creating image previews');
+    const previews = files.map(file => {
+      const preview = URL.createObjectURL(file);
+      console.log(`Created preview URL for ${file.name}:`, preview);
+      return preview;
+    });
+    setImagePreviews(previews);
+
+    try {
+      console.log('Starting image upload process');
+      setUploadingImages(true);
+      
+      // Upload each image
+      for (const file of files) {
+        console.log(`Beginning upload for file: ${file.name}`);
+        const publicUrl = await uploadImage(file, 0);
+        console.log(`Upload successful for ${file.name}`);
+        console.log('Received public URL:', publicUrl);
+        
+        setUploadedImageUrls(prev => {
+          console.log('Updating uploadedImageUrls state', [...prev, publicUrl]);
+          return [...prev, publicUrl];
+        });
+      }
+      
+      toast.success(`Successfully uploaded ${files.length} images`);
+    } catch (error) {
+      console.error('Error during upload process:', error);
+      toast.error(`Failed to upload images: ${(error as StorageError).message}`);
+    } finally {
+      console.log('Upload process completed');
+      setUploadingImages(false);
+    }
+  }
+
+  // Add cleanup for previews when component unmounts
+  useEffect(() => {
+    return () => {
+      imagePreviews.forEach(preview => URL.revokeObjectURL(preview));
+    };
+  }, [imagePreviews]);
 
   async function onSubmit(data: TaskFormData) {
     if (!user) {
@@ -100,14 +191,15 @@ export default function CreateTask() {
 
     setLoading(true);
     try {
-      // Create task
+      // Create task with location split into latitude and longitude
       const { data: task, error: taskError } = await supabase
         .from('tasks')
         .insert([
           {
             ...data,
             total_amount: totalAmount,
-            location: location,
+            latitude: location?.lat,
+            longitude: location?.lng,
             created_by: user.id,
             submission_status: 'in_process',
           },
@@ -117,31 +209,18 @@ export default function CreateTask() {
 
       if (taskError) throw taskError;
 
-      // Upload images if any
+      // Upload images to khautomations bucket and store references in task_images
       if (images.length > 0) {
         for (const image of images) {
-          const fileExt = image.name.split('.').pop();
-          const fileName = `${Math.random()}.${fileExt}`;
-          const filePath = `${user.id}/${task.id}/${fileName}`;
-
-          const { error: uploadError } = await supabase.storage
-            .from('task-images')
-            .upload(filePath, image);
-
-          if (uploadError) throw uploadError;
-
-          // Get public URL
-          const { data: publicUrl } = supabase.storage
-            .from('task-images')
-            .getPublicUrl(filePath);
-
-          // Save image reference
+          const publicUrl = await uploadImage(image, task.id);
+          
+          // Store the image reference in task_images table
           const { error: imageError } = await supabase
             .from('task_images')
             .insert([
               {
                 task_id: task.id,
-                image_url: publicUrl.publicUrl,
+                image_url: publicUrl,
               },
             ]);
 
@@ -312,11 +391,15 @@ export default function CreateTask() {
                 <label className="block text-sm font-medium text-gray-700">Images</label>
                 <div className="mt-1 flex justify-center px-6 pt-5 pb-6 border-2 border-gray-300 border-dashed rounded-md">
                   <div className="space-y-1 text-center">
-                    <Upload className="mx-auto h-12 w-12 text-gray-400" />
+                    {uploadingImages ? (
+                      <Loader2 className="mx-auto h-12 w-12 text-gray-400 animate-spin" />
+                    ) : (
+                      <Upload className="mx-auto h-12 w-12 text-gray-400" />
+                    )}
                     <div className="flex text-sm text-gray-600">
                       <label
                         htmlFor="images"
-                        className="relative cursor-pointer rounded-md bg-white font-medium text-indigo-600 focus-within:outline-none focus-within:ring-2 focus-within:ring-indigo-500 focus-within:ring-offset-2 hover:text-indigo-500"
+                        className="relative cursor-pointer rounded-md bg-white font-medium text-indigo-600 focus-within:outline-none focus-within:ring-2 focus-ring-indigo-500 focus-within:ring-offset-2 hover:text-indigo-500"
                       >
                         <span>Upload files</span>
                         <input
@@ -326,6 +409,7 @@ export default function CreateTask() {
                           accept="image/*"
                           onChange={handleImageChange}
                           className="sr-only"
+                          disabled={uploadingImages}
                         />
                       </label>
                       <p className="pl-1">or drag and drop</p>
@@ -333,9 +417,28 @@ export default function CreateTask() {
                     <p className="text-xs text-gray-500">PNG, JPG, GIF up to 10MB</p>
                   </div>
                 </div>
-                {images.length > 0 && (
-                  <div className="mt-2">
-                    <p className="text-sm text-gray-500">{images.length} files selected</p>
+
+                {(imagePreviews.length > 0 || uploadedImageUrls.length > 0) && (
+                  <div className="mt-4">
+                    <h4 className="text-sm font-medium text-gray-700 mb-2">
+                      {uploadingImages ? 'Uploading Images...' : 'Uploaded Images'}
+                    </h4>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+                      {imagePreviews.map((preview, index) => (
+                        <div key={`preview-${index}`} className="relative aspect-w-1 aspect-h-1">
+                          <img
+                            src={preview}
+                            alt={`Preview ${index + 1}`}
+                            className="object-cover rounded-lg"
+                          />
+                          {uploadingImages && (
+                            <div className="absolute inset-0 bg-black bg-opacity-50 flex items-center justify-center rounded-lg">
+                              <Loader2 className="h-6 w-6 animate-spin text-white" />
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>
