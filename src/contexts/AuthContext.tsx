@@ -1,79 +1,64 @@
 import { createContext, useContext, useEffect, useState } from 'react';
-import { User } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
-import { Database } from '../lib/database.types';
 
-type Profile = Database['public']['Tables']['profiles']['Row'];
+interface User {
+  id: string;
+  mobile: string;
+}
 
 interface AuthContextType {
   user: User | null;
-  profile: Profile | null;
   loading: boolean;
-  signIn: (email: string, password: string) => Promise<void>;
-  signOut: () => Promise<void>;
+  signIn: (mobile: string, password: string) => Promise<void>;
+  signOut: () => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
-  const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Check active sessions and sets the user
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user ?? null);
-      if (session?.user) {
-        fetchProfile(session.user.id);
-      }
-    });
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null);
-      if (session?.user) {
-        fetchProfile(session.user.id);
-      } else {
-        setProfile(null);
-      }
-    });
-
-    return () => subscription.unsubscribe();
+    const storedUser = localStorage.getItem('user');
+    if (storedUser) {
+      setUser(JSON.parse(storedUser));
+    }
+    setLoading(false);
   }, []);
 
-  async function fetchProfile(userId: string) {
+  async function signIn(mobile: string, password: string) {
     try {
       const { data, error } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', userId)
+        .from('custom_users')
+        .select('id, mobile, password')
+        .eq('mobile', mobile)
         .single();
-
-      if (error) throw error;
-      setProfile(data);
-    } catch (error) {
-      console.error('Error fetching profile:', error);
-    } finally {
-      setLoading(false);
+  
+      if (error || !data) throw new Error('User not found!');
+  
+      const { data: passwordMatch, error: rpcError } = await supabase.rpc(
+        'check_password',
+        { user_password: password, hash: data.password }
+      );
+  
+      if (rpcError || !passwordMatch) throw new Error('Invalid password!');
+  
+      const userData = { id: data.id, mobile: data.mobile };
+      setUser(userData);
+      localStorage.setItem('user', JSON.stringify(userData));
+    } catch (error: any) {
+      throw new Error(error.message || 'Failed to sign in.');
     }
   }
 
-  async function signIn(email: string, password: string) {
-    const { error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
-    if (error) throw error;
-  }
-
-  async function signOut() {
-    const { error } = await supabase.auth.signOut();
-    if (error) throw error;
+  function signOut() {
+    setUser(null);
+    localStorage.removeItem('user');
   }
 
   const value = {
     user,
-    profile,
     loading,
     signIn,
     signOut,
